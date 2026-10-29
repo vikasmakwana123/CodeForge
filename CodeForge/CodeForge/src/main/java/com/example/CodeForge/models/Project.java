@@ -3,7 +3,6 @@ import jakarta.persistence.*;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
-import org.apache.catalina.User;
 
 import java.time.Instant;
 import java.util.UUID;
@@ -24,8 +23,20 @@ public class Project {
     private String description;
     private String language;            // java, node, python...
 
+    @Enumerated(EnumType.STRING)
     @Column(nullable = false)
-    private String rootPath;            // e.g. workspaces/{userId}/{projectId}
+    private ProjectStatus status = ProjectStatus.CREATING;
+
+    @Column(nullable = false)
+    private String appType;
+
+    @Column(length = 1000)
+    private String errorMessage;
+
+    private String containerName;
+    private Integer hostPort;
+
+    private String rootPath;
 
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
     @JoinColumn(name = "owner_id", nullable = false)
@@ -33,4 +44,9 @@ public class Project {
 
     private Instant createdAt = Instant.now();
     private Instant updatedAt = Instant.now();
+
+    @PreUpdate
+    void updateTimestamp() {
+        updatedAt = Instant.now();
+    }
 }

@@ -1,95 +1,95 @@
 package com.example.CodeForge.service;
 
+import com.example.CodeForge.models.Project;
+import com.example.CodeForge.models.ProjectStatus;
+import org.springframework.http.HttpStatus;
+import org.springframework.stereotype.Service;
+import org.springframework.web.server.ResponseStatusException;
+
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.DirectoryStream;
-import java.nio.file.FileAlreadyExistsException;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
-import java.nio.file.Paths;
+import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.stream.Stream;
-
-import org.springframework.stereotype.Service;
+import java.util.UUID;
 
 @Service
 public class FileService {
-    private final Path projectRoot = Paths.get("C:/Users/Vikas/Downloads/CodeForge/projects")
-            .toAbsolutePath()
-            .normalize();
+    private final ProjectService projectService;
 
-    // Create File
-    public void createFile(String relativePath) throws IOException {
-        Path filePath = resolveSafePath(relativePath);
-        if (Files.exists(filePath)) {
-            throw new FileAlreadyExistsException(
-                    "File already exists: " + relativePath);
+    public FileService(ProjectService projectService) {
+        this.projectService = projectService;
+    }
+
+    public void createFile(UUID projectId, UUID userId, String relativePath) throws IOException {
+        Path filePath = resolveSafePath(projectId, userId, relativePath);
+        if (Files.exists(filePath, LinkOption.NOFOLLOW_LINKS)) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "File already exists: " + relativePath);
         }
-        // Making sure that parent directory exists
         Path parent = filePath.getParent();
         if (parent != null) {
             Files.createDirectories(parent);
         }
+        filePath = resolveSafePath(projectId, userId, relativePath);
         Files.createFile(filePath);
     }
 
-
-    // CREATE FOLDER
-    public void createFolder(String relativePath) throws IOException {
-
-        Path folderPath = resolveSafePath(relativePath);
-
-        if (Files.exists(folderPath)) {
-            throw new FileAlreadyExistsException(
-                    "Folder already exists: " + relativePath
-            );
+    public void createFolder(UUID projectId, UUID userId, String relativePath) throws IOException {
+        Path folderPath = resolveSafePath(projectId, userId, relativePath);
+        if (Files.exists(folderPath, LinkOption.NOFOLLOW_LINKS)) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Folder already exists: " + relativePath);
         }
-
         Files.createDirectories(folderPath);
     }
 
-    // READ FILE
-    public String readFile(String relativePath) throws IOException {
-
-        Path filePath = resolveSafePath(relativePath);
-
-        if (!Files.exists(filePath)) {
-            throw new NoSuchFileException(
-                    "File does not exist: " + relativePath
-            );
-        }
-
-        if (!Files.isRegularFile(filePath)) {
-            throw new IOException(
-                    "Path is not a file: " + relativePath
-            );
-        }
-
-        return Files.readString(
-                filePath,
-                StandardCharsets.UTF_8
-        );
+    public String readFile(UUID projectId, UUID userId, String relativePath) throws IOException {
+        return Files.readString(getExistingFilePath(projectId, userId, relativePath), StandardCharsets.UTF_8);
     }
-    // WRITE / UPDATE FILE
-    public void writeFile(
-            String relativePath,
-            String content
-    ) throws IOException {
 
-        Path filePath = resolveSafePath(relativePath);
+    public byte[] readFileBytes(UUID projectId, UUID userId, String relativePath) throws IOException {
+        return Files.readAllBytes(getExistingFilePath(projectId, userId, relativePath));
+    }
 
-        if (!Files.exists(filePath)) {
+    public String getContentType(UUID projectId, UUID userId, String relativePath) throws IOException {
+        Path filePath = getExistingFilePath(projectId, userId, relativePath);
+        String contentType = Files.probeContentType(filePath);
+        if (contentType != null && contentType.startsWith("image/")) {
+            return contentType;
+        }
+        if (filePath.getFileName().toString().toLowerCase().endsWith(".svg")) {
+            return "image/svg+xml";
+        }
+        return "application/octet-stream";
+    }
 
+    private Path getExistingFilePath(UUID projectId, UUID userId, String relativePath) throws IOException {
+        Path filePath = resolveSafePath(projectId, userId, relativePath);
+        if (!Files.exists(filePath, LinkOption.NOFOLLOW_LINKS)) {
+            throw new NoSuchFileException("File does not exist: " + relativePath);
+        }
+        if (!Files.isRegularFile(filePath, LinkOption.NOFOLLOW_LINKS)) {
+            throw new IOException("Path is not a file: " + relativePath);
+        }
+        return filePath;
+    }
+
+    public void writeFile(UUID projectId, UUID userId, String relativePath, String content) throws IOException {
+        Path filePath = resolveSafePath(projectId, userId, relativePath);
+        if (!Files.exists(filePath, LinkOption.NOFOLLOW_LINKS)) {
             Path parent = filePath.getParent();
-
             if (parent != null) {
                 Files.createDirectories(parent);
             }
         }
-
+        filePath = resolveSafePath(projectId, userId, relativePath);
         Files.writeString(
                 filePath,
                 content,
@@ -99,112 +99,89 @@ public class FileService {
         );
     }
 
-    // DELETE FILE OR FOLDER
-    public void delete(String relativePath) throws IOException {
-
-        Path path = resolveSafePath(relativePath);
-
-        if (!Files.exists(path)) {
-            throw new NoSuchFileException(
-                    "Path does not exist: " + relativePath);
+    public void delete(UUID projectId, UUID userId, String relativePath) throws IOException {
+        Path root = getReadyRoot(projectId, userId);
+        Path path = resolveSafePath(root, relativePath);
+        if (path.equals(root)) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "The project root cannot be deleted with a file operation");
         }
-        if (Files.isDirectory(path)) {
-            try (Stream<Path> paths = Files.walk(path)) {
-                paths.sorted((a, b) -> b.compareTo(a))
-                        .forEach(p -> {
-
-                            try {
-                                Files.delete(p);
-                            } catch (IOException e) {
-                                throw new RuntimeException(e);
-                            }
-                        });
+        if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
+            throw new NoSuchFileException("Path does not exist: " + relativePath);
+        }
+        Files.walkFileTree(path, new SimpleFileVisitor<>() {
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attributes) throws IOException {
+                Files.delete(file);
+                return FileVisitResult.CONTINUE;
             }
-        } else {
 
-            Files.delete(path);
-        }
+            @Override
+            public FileVisitResult postVisitDirectory(Path directory, IOException exception) throws IOException {
+                if (exception != null) {
+                    throw exception;
+                }
+                Files.delete(directory);
+                return FileVisitResult.CONTINUE;
+            }
+        });
     }
 
-    // LIST DIRECTORY
-    public List<String> listDirectory(
-            String relativePath) throws IOException {
-
-        Path directory = resolveSafePath(relativePath);
-
-        if (!Files.exists(directory)) {
-            throw new NoSuchFileException(
-                    "Directory does not exist: "
-                            + relativePath);
+    public List<String> listDirectory(UUID projectId, UUID userId, String relativePath) throws IOException {
+        Path root = getReadyRoot(projectId, userId);
+        Path directory = resolveSafePath(root, relativePath);
+        if (!Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) {
+            throw new NoSuchFileException("Directory does not exist: " + relativePath);
         }
-
-        if (!Files.isDirectory(directory)) {
-            throw new IOException(
-                    "Path is not a directory: "
-                            + relativePath);
+        if (!Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)) {
+            throw new IOException("Path is not a directory: " + relativePath);
         }
 
         List<String> result = new ArrayList<>();
-
         try (DirectoryStream<Path> stream = Files.newDirectoryStream(directory)) {
-
-            for (Path path : stream) {
-
-                String child = projectRoot
-                        .relativize(path)
-                        .toString()
-                        .replace("\\", "/");
-
-                result.add(child);
+            for (Path child : stream) {
+                if (!Files.isSymbolicLink(child)) {
+                    result.add(root.relativize(child).toString().replace("\\", "/"));
+                }
             }
         }
-
         return result;
     }
 
-    // CHECK EXISTS
-    public boolean exists(String relativePath) {
-
-        Path path = resolveSafePath(relativePath);
-
-        return Files.exists(path);
+    public boolean exists(UUID projectId, UUID userId, String relativePath) {
+        return Files.exists(resolveSafePath(projectId, userId, relativePath), LinkOption.NOFOLLOW_LINKS);
     }
 
-    // GET FILE INFORMATION
-    public boolean isDirectory(String relativePath) {
-
-        Path path = resolveSafePath(relativePath);
-
-        return Files.isDirectory(path);
+    private Path resolveSafePath(UUID projectId, UUID userId, String relativePath) {
+        return resolveSafePath(getReadyRoot(projectId, userId), relativePath);
     }
 
-    public String toRelativePath(Path path) {
-        return projectRoot
-                .relativize(path.toAbsolutePath().normalize())
-                .toString()
-                .replace("\\", "/");
-    }
-
-    public Path getProjectRoot() {
-        return projectRoot;
-    }
-
-    // SAFE PATH RESOLUTION
-    private Path resolveSafePath(String relativePath) {
-
-        if (relativePath == null ||
-                relativePath.isBlank()) {
-            throw new IllegalArgumentException(
-                    "Path cannot be empty");
+    private Path getReadyRoot(UUID projectId, UUID userId) {
+        Project project = projectService.getOwned(projectId, userId);
+        if (project.getStatus() != ProjectStatus.READY || project.getRootPath() == null) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Project is not ready");
         }
-        Path resolved = projectRoot
-                .resolve(relativePath)
-                .normalize();
-        if (!resolved.startsWith(projectRoot)) {
-            throw new SecurityException(
-                    "Access outside project directory is not allowed");
+        Path root = Path.of(project.getRootPath()).toAbsolutePath().normalize();
+        if (!Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(root)) {
+            throw new IllegalStateException("Stored project directory is invalid");
         }
+        return root;
+    }
 
+    private Path resolveSafePath(Path root, String relativePath) {
+        if (relativePath == null || relativePath.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Path cannot be empty");
+        }
+        Path resolved = root.resolve(relativePath).normalize();
+        if (!resolved.startsWith(root)) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Access outside project directory is not allowed");
+        }
+        Path current = root;
+        for (Path segment : root.relativize(resolved)) {
+            current = current.resolve(segment);
+            if (Files.isSymbolicLink(current)) {
+                throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Symbolic links are not allowed in project paths");
+            }
+        }
         return resolved;
     }
 }

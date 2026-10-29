@@ -1,5 +1,6 @@
 package com.example.CodeForge.dto;
 
+import java.util.UUID;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
@@ -11,6 +12,7 @@ import lombok.Setter;
 @NoArgsConstructor
 @AllArgsConstructor
 public class FileChangeEvent {
+    private UUID projectId;
     private String type;
     private String path;
 

@@ -5,7 +5,6 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 import lombok.ToString;
-import org.apache.catalina.User;
 
 import java.time.Instant;
 import java.util.UUID;
@@ -37,4 +36,3 @@ public class UserApiKey {
     private String defaultModel;
     private Instant createdAt = Instant.now();
 }
-

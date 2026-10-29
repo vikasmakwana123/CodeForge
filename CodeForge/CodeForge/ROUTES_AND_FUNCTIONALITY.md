@@ -1,171 +1,96 @@
 # CodeForge: routes and functionality
 
-## Overview
+## Project provisioning
 
-CodeForge is a Spring Boot backend for creating starter projects and managing the files inside them. All file-system operations are restricted to this directory:
+Projects are persisted in PostgreSQL. `POST /api/projects` accepts `name` and `type`, validates them, saves a project with `CREATING` status and its owner, then returns `202 Accepted` with the database-generated UUID. Provisioning runs asynchronously. Poll `GET /api/projects/{projectId}` until its status is `READY` or `FAILED`; `errorMessage` describes a provisioning failure. The project tree and file endpoints return `409 Conflict` while the project is not ready.
 
-```text
-C:/Users/Vikas/Downloads/CodeForge/projects
-```
+Register with `POST /api/auth/register` using `name`, `email`, and `password`, or sign in with `POST /api/auth/login` using `email` and `password`. Both return a bearer access token and user information. Send `Authorization: Bearer <accessToken>` on project and REST file requests. Tokens expire after the configured `JWT_EXPIRATION_SECONDS` (one hour by default). Passwords are BCrypt-hashed before storage.
 
-Every `path` sent to the file APIs must be a non-empty path *relative* to that directory. For example, use `my-project/src/App.jsx`, not a full `C:/...` path.
+The authenticated request principal exposes the user's UUID as its name. Project status, tree, REST file operations, and WebSocket file operations are scoped to that user. STOMP clients must send their bearer token as the `Authorization` CONNECT header.
 
-## REST API
-
-### File and folder management
-
-Base path: `/api/files`
-
-| Method | Route | Parameters / body | Functionality |
+| Method | Route | Body / parameters | Functionality |
 | --- | --- | --- | --- |
-| `POST` | `/api/files/file?path={path}` | Query: `path` | Creates an empty file. Missing parent folders are created automatically. Returns `201 Created`. |
-| `POST` | `/api/files/folder?path={path}` | Query: `path` | Creates a folder and any missing parent folders. Returns `201 Created`. |
-| `GET` | `/api/files?path={path}` | Query: `path` | Reads a UTF-8 text file and returns its contents. |
-| `PUT` | `/api/files?path={path}` | Query: `path`; raw text request body | Creates the file when it does not exist, or replaces all existing contents when it does. |
-| `DELETE` | `/api/files?path={path}` | Query: `path` | Deletes a file, or recursively deletes a folder and everything inside it. |
-| `GET` | `/api/files/list?path={path}` | Optional query: `path`, defaults to `.` | Lists the immediate files and folders in a directory. The response contains relative paths. |
-| `GET` | `/api/files/exists?path={path}` | Query: `path` | Returns whether the path exists. |
+| `POST` | `/api/projects` (also `/api/projects/create`) | JSON: `name`, `type` | Creates the pending database row and starts async scaffolding. |
+| `GET` | `/api/projects/{projectId}` | UUID path parameter | Returns the authenticated owner's project status. |
+| `GET` | `/api/projects/{projectId}/tree` | UUID path parameter | Returns the ready project's recursive file tree. |
+| `DELETE` | `/api/projects/{projectId}` | UUID path parameter | Stops/removes recorded Docker resources, deletes the workspace, then deletes the owner's database row. |
 
-### Examples
+Supported `appType` values are `react`, `vue`, `angular`, `next`/`nextjs`/`next.js`, `node`/`nodejs`, `vite`, and `spring`/`springboot`/`spring-boot`. Project names must start with a letter and contain only letters, digits, or hyphens, up to 40 characters.
 
-Create a file:
+Example request:
 
 ```http
-POST /api/files/file?path=demo/src/main.js
-```
-
-Write or replace its content:
-
-```http
-PUT /api/files?path=demo/src/main.js
-Content-Type: text/plain
-
-console.log('Hello from CodeForge');
-```
-
-Read it:
-
-```http
-GET /api/files?path=demo/src/main.js
-```
-
-Response:
-
-```json
-{
-  "path": "demo/src/main.js",
-  "content": "console.log('Hello from CodeForge');"
-}
-```
-
-Delete it:
-
-```http
-DELETE /api/files?path=demo/src/main.js
-```
-
-Successful create, write, and delete responses include a `message` and `path`. Invalid paths, duplicate creates, missing paths, and attempts to use a path outside `projects` return `400 Bad Request` with an `error` value.
-
-> Warning: deleting a folder deletes all of its contents permanently.
-
-### Project creation and tree
-
-Base path: `/api/projects`
-
-| Method | Route | Body / parameter | Functionality |
-| --- | --- | --- | --- |
-| `POST` | `/api/projects/create` | JSON: `appName`, `appType` | Generates a project in a new UUID-named folder under `projects` and returns that project ID. |
-| `GET` | `/api/projects/{projectId}/tree` | Path: UUID `projectId` | Returns the project's recursive file/folder tree. |
-
-Supported `appType` values:
-
-- `react`
-- `vue`
-- `angular`
-- `next`, `nextjs`, or `next.js`
-- `node` or `nodejs`
-- `vite`
-- `spring`, `springboot`, or `spring-boot`
-
-Create-project example:
-
-```http
-POST /api/projects/create
+POST /api/projects
 Content-Type: application/json
 
 {
-  "appName": "my-react-app",
-  "appType": "react"
+  "name": "my-react-app",
+  "type": "react"
 }
 ```
 
-The server uses Node/NPM/NPX for React, Vue, Angular, Next, Node, and Vite templates. It uses `curl` and `tar` with Spring Initializr for Spring Boot templates; those commands must be installed and available on the server machine.
-
-## WebSocket API (STOMP + SockJS)
-
-Connect to the SockJS endpoint:
-
-```text
-/api
-```
-
-Send file-operation messages to:
-
-```text
-/app/files
-```
-
-Subscribe to receive both operation responses and filesystem-change notifications:
-
-```text
-/topic/files
-```
-
-### Send an operation
+Example accepted response:
 
 ```json
 {
+  "id": "database-generated-uuid",
+  "name": "my-react-app",
+  "appType": "react",
+  "status": "CREATING",
+  "errorMessage": null,
+  "hostPort": null
+}
+```
+
+## File and folder management
+
+All file paths are relative to the app directory recorded on the project row. Every route requires both `projectId` and `path`; ownership and `READY` status are checked before file access. Traversal outside the app root and symbolic links are rejected.
+
+| Method | Route | Parameters / body | Functionality |
+| --- | --- | --- | --- |
+| `POST` | `/api/files/file` | Query: `projectId`, `path` | Creates an empty file. |
+| `POST` | `/api/files/folder` | Query: `projectId`, `path` | Creates a folder and missing parents. |
+| `GET` | `/api/files` | Query: `projectId`, `path` | Reads a UTF-8 text file. |
+| `PUT` | `/api/files` | Query: `projectId`, `path`; raw text body | Creates or replaces a file. |
+| `DELETE` | `/api/files` | Query: `projectId`, `path` | Deletes a file or subfolder; the project root cannot be deleted here. |
+| `GET` | `/api/files/list` | Query: `projectId`, optional `path` (defaults to `.`) | Lists one directory level. |
+| `GET` | `/api/files/exists` | Query: `projectId`, `path` | Checks whether the path exists. |
+
+## WebSocket API (STOMP + SockJS)
+
+Connect to `/api`, send file operations to `/app/files`, and subscribe to the authenticated user's `/user/queue/files` destination. Include `projectId` in each operation; the owner is derived from the authenticated principal, not the message.
+
+```json
+{
+  "projectId": "database-generated-uuid",
   "operation": "WRITE",
-  "path": "demo/src/main.js",
+  "path": "src/main.js",
   "content": "console.log('updated');"
 }
 ```
 
-| Operation | Required fields | Functionality |
-| --- | --- | --- |
-| `CREATE_FILE` | `operation`, `path` | Creates an empty file. |
-| `CREATE_FOLDER` | `operation`, `path` | Creates a folder. |
-| `READ` | `operation`, `path` | Reads a text file; returned content is included in the topic event. |
-| `WRITE` | `operation`, `path`, `content` | Creates or overwrites a file. |
-| `DELETE` | `operation`, `path` | Deletes a file or recursively deletes a folder. |
+Operations are `CREATE_FILE`, `CREATE_FOLDER`, `READ`, `WRITE`, and `DELETE`. Operation results and filesystem notifications include the project ID and are sent only to that project's owner.
 
-A successful operation publishes an event such as:
+## Database and workspace configuration
 
-```json
-{
-  "operation": "WRITE_SUCCESS",
-  "path": "demo/src/main.js",
-  "content": null,
-  "error": null
-}
+Copy `.env.example` to `.env`, then set unique values for `DB_PASSWORD` and `JWT_SECRET`. The JWT secret must be at least 32 bytes and should be a randomly generated secret:
+
+```powershell
+Copy-Item .env.example .env
+docker compose up --build
 ```
 
-A read success includes the file contents in `content`. Failed operations publish `operation: "ERROR"` and provide the reason in `error`.
+Compose starts PostgreSQL, the backend, and a dedicated Docker-in-Docker runner. Database name and user can be overridden with `DB_NAME` and `DB_USER`. The backend accepts `DATABASE_URL`, `DATABASE_USERNAME`, and `DATABASE_PASSWORD`; `CODEFORGE_PROJECTS_BASE` configures the workspace directory and defaults to `./projects`. Compose persists the database, generated projects, and runner images in named volumes.
 
-The backend also watches the entire `projects` directory. When a file or directory changes, it publishes a notification such as:
+Choose exactly one backend runtime at a time; both the IntelliJ backend and Compose backend bind port 8080:
 
-```json
-{
-  "type": "MODIFIED",
-  "path": "demo/src/main.js"
-}
-```
+- **Run the backend from IntelliJ:** start only the database with `docker compose up -d codeforge-db`, then run `CodeForgeApplication` from IntelliJ. The IDE process uses `localhost:5433` and the local Docker Desktop engine.
+- **Run the backend in Compose:** stop the IntelliJ application, then run `docker compose up --build`. The Compose backend uses the internal database hostname and isolated Docker runner.
 
-The possible notification types are `CREATED`, `MODIFIED`, and `DELETED`.
+Do not run `docker compose up` while also starting the IntelliJ backend. Existing projects created by one runtime may have workspace paths that are not accessible to the other runtime; inaccessible stored roots are skipped by the startup file watcher and reported in the backend log.
 
-## Important constraints
+Spring Boot projects are downloaded directly from Spring Initializr and extracted with ZIP path validation. CLI generation, Docker image builds, and container startup use a five-minute process timeout. Opening the workspace terminal builds and starts the project's resource-limited container if it is not already running; terminal input is sent to an interactive shell inside that project's container. Disconnecting the terminal closes its shell process. Project containers are removed when the project is deleted.
 
-- File APIs cannot access anything outside the configured `projects` directory; traversal paths such as `../../Windows` are rejected.
-- `GET /api/files/list` lists one directory level. Use the project-tree route when you need a complete recursive tree for a created project.
-- File reads and writes use UTF-8 text; the API is not designed for binary files.
-- REST and WebSocket endpoints permit browser requests from every origin and port (`*`). This is convenient for local development, but should be restricted to trusted frontend origins before deploying the service publicly.
+The runner uses a privileged Docker-in-Docker service and does not mount the host Docker socket. This limits Docker control to the dedicated runner daemon, but privileged nested container runtimes still carry host-kernel risk; use this local development setup only on a trusted machine and do not expose the runner to untrusted networks. Rebuild with `docker compose up --build` after changing the backend Dockerfile or Compose configuration. Docker Desktop must be running.
+
+The directory tree omits `node_modules`, `.git`, `target`, and `dist`, and does not traverse symbolic links. REST CORS origins remain limited to the localhost frontend ports configured in `WebSocketConfig`.

@@ -2,7 +2,11 @@ package com.example.CodeForge.controller;
 
 import java.io.IOException;
 import java.util.Locale;
+import java.security.Principal;
+import java.util.UUID;
 
+import com.example.CodeForge.config.PrincipalUserId;
+import org.springframework.web.server.ResponseStatusException;
 import org.springframework.messaging.handler.annotation.MessageMapping;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Controller;
@@ -13,8 +17,6 @@ import com.example.CodeForge.service.FileService;
 
 @Controller
 public class FileWebSocketController {
-    private static final String FILES_TOPIC = "/topic/files";
-
     private final FileService fileService;
     private final SimpMessagingTemplate messagingTemplate;
 
@@ -26,41 +28,52 @@ public class FileWebSocketController {
     }
 
     @MessageMapping("/files")
-    public void handleOperation(FileOperationRequest request) {
-        if (request == null || request.getOperation() == null || request.getPath() == null) {
-            publishError(request == null ? null : request.getPath(), "operation and path are required");
+    public void handleOperation(FileOperationRequest request, Principal principal) {
+        UUID userId;
+        try {
+            userId = PrincipalUserId.resolve(principal);
+        } catch (ResponseStatusException exception) {
+            return;
+        }
+        if (request == null || request.getProjectId() == null
+                || request.getOperation() == null || request.getPath() == null) {
+            publishError(userId, request == null ? null : request.getProjectId(),
+                    request == null ? null : request.getPath(), "projectId, operation and path are required");
             return;
         }
 
         try {
             String operation = request.getOperation().toUpperCase(Locale.ROOT);
             String content = null;
+            UUID projectId = request.getProjectId();
 
             switch (operation) {
-                case "CREATE_FILE" -> fileService.createFile(request.getPath());
-                case "CREATE_FOLDER" -> fileService.createFolder(request.getPath());
-                case "DELETE" -> fileService.delete(request.getPath());
+                case "CREATE_FILE" -> fileService.createFile(projectId, userId, request.getPath());
+                case "CREATE_FOLDER" -> fileService.createFolder(projectId, userId, request.getPath());
+                case "DELETE" -> fileService.delete(projectId, userId, request.getPath());
                 case "WRITE" -> {
                     if (request.getContent() == null) {
                         throw new IllegalArgumentException("content is required for WRITE");
                     }
-                    fileService.writeFile(request.getPath(), request.getContent());
+                    fileService.writeFile(projectId, userId, request.getPath(), request.getContent());
                 }
-                case "READ" -> content = fileService.readFile(request.getPath());
+                case "READ" -> content = fileService.readFile(projectId, userId, request.getPath());
                 default -> throw new IllegalArgumentException("Unsupported operation: " + request.getOperation());
             }
 
-            messagingTemplate.convertAndSend(
-                    FILES_TOPIC,
-                    new FileOperationEvent(operation + "_SUCCESS", request.getPath(), content, null));
+            messagingTemplate.convertAndSendToUser(
+                    userId.toString(),
+                    "/queue/files",
+                    new FileOperationEvent(projectId, operation + "_SUCCESS", request.getPath(), content, null));
         } catch (IOException | RuntimeException exception) {
-            publishError(request.getPath(), exception.getMessage());
+            publishError(userId, request.getProjectId(), request.getPath(), exception.getMessage());
         }
     }
 
-    private void publishError(String path, String error) {
-        messagingTemplate.convertAndSend(
-                FILES_TOPIC,
-                new FileOperationEvent("ERROR", path, null, error));
+    private void publishError(UUID userId, UUID projectId, String path, String error) {
+        messagingTemplate.convertAndSendToUser(
+                userId.toString(),
+                "/queue/files",
+                new FileOperationEvent(projectId, "ERROR", path, null, error));
     }
 }

@@ -1,22 +1,27 @@
 package com.example.CodeForge.dto;
 
+import com.fasterxml.jackson.annotation.JsonAlias;
+
 public class ProjectRequest {
-    private String appName;
-    private String appType;
+    @JsonAlias("appName")
+    private String name;
 
-    public String getAppName() {
-        return appName;
+    @JsonAlias("appType")
+    private String type;
+
+    public String getName() {
+        return name;
     }
 
-    public void setAppName(String appName) {
-        this.appName = appName;
+    public void setName(String name) {
+        this.name = name;
     }
 
-    public String getAppType() {
-        return appType;
+    public String getType() {
+        return type;
     }
 
-    public void setAppType(String appType) {
-        this.appType = appType;
+    public void setType(String type) {
+        this.type = type;
     }
 }

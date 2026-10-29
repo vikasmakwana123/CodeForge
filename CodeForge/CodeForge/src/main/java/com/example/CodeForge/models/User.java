@@ -1,5 +1,5 @@
-import com.example.CodeForge.models.Project;
-import com.example.CodeForge.models.UserApiKey;
+package com.example.CodeForge.models;
+
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import jakarta.persistence.*;
 import lombok.Getter;

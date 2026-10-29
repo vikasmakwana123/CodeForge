@@ -1,4 +1,21 @@
 services:
+  codeforge-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${DB_NAME:-codeforge}
+      POSTGRES_USER: ${DB_USER:-codeforge}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in the environment}
+    volumes:
+      - codeforge-database:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-codeforge} -d ${DB_NAME:-codeforge}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
   codeforge-backend:
     build:
       context: .
@@ -8,4 +25,39 @@ services:
       - "8080:8080"
     environment:
       SERVER_PORT: 8080
+      DATABASE_URL: jdbc:postgresql://codeforge-db:5432/${DB_NAME:-codeforge}
+      DATABASE_USERNAME: ${DB_USER:-codeforge}
+      DATABASE_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in the environment}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in the environment}
+      CODEFORGE_PROJECTS_BASE: /app/projects
+      DOCKER_HOST: tcp://codeforge-docker:2375
+    volumes:
+      - codeforge-projects:/app/projects
+    depends_on:
+      codeforge-db:
+        condition: service_healthy
+      codeforge-docker:
+        condition: service_healthy
     restart: unless-stopped
+
+  codeforge-docker:
+    image: docker:27-dind
+    privileged: true
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+    volumes:
+      - codeforge-projects:/app/projects
+      - codeforge-docker-data:/var/lib/docker
+    expose:
+      - "2375"
+    healthcheck:
+      test: ["CMD", "docker", "info"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  codeforge-database:
+  codeforge-projects:
+  codeforge-docker-data:
