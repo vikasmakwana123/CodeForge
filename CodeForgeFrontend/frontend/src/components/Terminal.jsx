@@ -1,141 +1,135 @@
-import React, { useEffect, useMemo, useRef } from 'react'
-import { useXTerm } from 'react-xtermjs'
-import { AttachAddon } from '@xterm/addon-attach'
+import { useEffect, useMemo, useRef } from 'react'
+import { Client } from '@stomp/stompjs'
 import { FitAddon } from '@xterm/addon-fit'
+import { useXTerm } from 'react-xtermjs'
+import SockJS from 'sockjs-client'
 import '@xterm/xterm/css/xterm.css'
+import { getAccessToken } from '../api'
 
-const Terminal = () => {
-  const socketRef = useRef(null)
-  const fitAddonRef = useRef(null)
-  const { instance, ref } = useXTerm({
-    options: {
-      cursorBlink: true,
-      cursorStyle: 'bar',
-      cursorWidth: 14,
-      cursorInactiveStyle: 'bar',
-      fontSize: 14,
-      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-      theme: {
-        background: '#0b1120',
-        foreground: '#e2e8f0',
-        cursor: '#7dd3fc',
-        cursorAccent: '#ffffff',
-        selectionBackground: 'rgba(125, 211, 252, 0.35)',
-        black: '#0b1120',
-        red: '#f87171',
-        green: '#34d399',
-        yellow: '#fbbf24',
-        blue: '#60a5fa',
-        magenta: '#c084fc',
-        cyan: '#22d3ee',
-        white: '#e2e8f0',
-        brightBlack: '#475569',
-        brightRed: '#fca5a5',
-        brightGreen: '#6ee7b7',
-        brightYellow: '#fcd34d',
-        brightBlue: '#93c5fd',
-        brightMagenta: '#e9d5ff',
-        brightCyan: '#67e8f9',
-        brightWhite: '#ffffff',
-      },
+const Terminal = ({ projectId }) => {
+  const sendRef = useRef(null)
+  const connectionFailureRef = useRef(false)
+  const connectionIdRef = useRef(crypto.randomUUID())
+  const options = useMemo(() => ({
+    cursorBlink: true,
+    cursorStyle: 'bar',
+    fontSize: 14,
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+    theme: {
+      background: '#0b1120',
+      foreground: '#e2e8f0',
+      cursor: '#7dd3fc',
+      cursorAccent: '#ffffff',
+      selectionBackground: 'rgba(125, 211, 252, 0.35)',
     },
+  }), [])
+  const { instance, ref } = useXTerm({
+    options,
     listeners: {
       onData: (data) => {
-        if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
-          socketRef.current.send(data)
+        const interruptIndex = data.indexOf('\x03')
+        if (interruptIndex === -1) {
+          sendRef.current?.('INPUT', data)
+          return
+        }
+
+        if (interruptIndex > 0) sendRef.current?.('INPUT', data.slice(0, interruptIndex))
+        sendRef.current?.('INTERRUPT')
+        if (interruptIndex < data.length - 1) {
+          sendRef.current?.('INPUT', data.slice(interruptIndex + 1))
         }
       },
-      onResize: () => {
-        if (fitAddonRef.current) {
-          fitAddonRef.current.fit()
-        }
-      },
+      onResize: ({ cols, rows }) => sendRef.current?.('RESIZE', null, cols, rows),
     },
   })
-
-  const socketUrl = useMemo(() => {
-    if (typeof window === 'undefined') {
-      return 'ws://localhost:8080/terminal'
-    }
-    return import.meta.env.VITE_TERMINAL_WS || 'ws://localhost:8080/terminal'
-  }, [])
 
   useEffect(() => {
     if (!instance) return undefined
 
     const fitAddon = new FitAddon()
-    fitAddonRef.current = fitAddon
     instance.loadAddon(fitAddon)
     fitAddon.fit()
+    const handleWindowResize = () => fitAddon.fit()
+    window.addEventListener('resize', handleWindowResize)
 
-    const socket = (() => {
-      try {
-        return new WebSocket(socketUrl)
-      } catch (error) {
-        return null
-      }
-    })()
-
-    if (socket) {
-      socketRef.current = socket
-      const attachAddon = new AttachAddon(socket)
-      instance.loadAddon(attachAddon)
-      instance.writeln('\r\nConnected to remote terminal session...')
-
-      const handleMessage = (event) => {
-        const output = typeof event.data === 'string'
-          ? event.data
-          : new TextDecoder().decode(event.data)
-        instance.write(output)
-      }
-
-      socket.addEventListener('message', handleMessage)
-      socket.addEventListener('close', () => {
-        instance.writeln('\r\nTerminal connection closed.')
-      })
-
+    if (!projectId) {
+      instance.writeln('Open a saved project to use its terminal.')
       return () => {
-        socket.removeEventListener('message', handleMessage)
-        socket.close()
+        fitAddon.dispose()
+        window.removeEventListener('resize', handleWindowResize)
       }
     }
 
-    instance.writeln('\r\nTerminal ready. Connect your backend to ws://localhost:8080/terminal for live updates.')
+    instance.writeln('Connecting to project terminal...')
+    const connectionId = connectionIdRef.current
+    const client = new Client({
+      webSocketFactory: () => new SockJS('/api'),
+      connectHeaders: { Authorization: `Bearer ${getAccessToken() || ''}` },
+      reconnectDelay: 2000,
+      connectionTimeout: 10000,
+      onConnect: () => {
+        connectionFailureRef.current = false
+        client.subscribe(`/user/queue/terminal/${connectionId}`, (message) => {
+          const event = JSON.parse(message.body)
+          if (event.type === 'OUTPUT' || event.type === 'STATUS') {
+            instance.write(event.data || '')
+          } else if (event.type === 'ERROR') {
+            instance.writeln(`\r\n[CodeForge] ${event.error || 'Terminal error'}\r\n`)
+          } else if (event.type === 'EXITED') {
+            instance.write(event.data || '\r\nTerminal process ended.\r\n')
+          }
+        })
+        sendRef.current = (action, data, columns, rows) => client.publish({
+          destination: '/app/terminal',
+          body: JSON.stringify({ action, projectId, connectionId, data, columns, rows }),
+        })
+        sendRef.current('OPEN', null, instance.cols, instance.rows)
+        instance.focus()
+      },
+      onStompError: (frame) => {
+        client.reconnectDelay = 0
+        if (connectionFailureRef.current) return
+        connectionFailureRef.current = true
+        const detail = Array.from(
+          frame.headers?.message || frame.body || 'The server rejected the terminal connection.',
+        )
+          .filter((character) => character.charCodeAt(0) >= 32 && character.charCodeAt(0) !== 127)
+          .join('')
+          .slice(0, 300)
+        instance.writeln(`\r\n[CodeForge] Terminal connection rejected: ${detail}\r\n`)
+        void client.deactivate()
+      },
+      onWebSocketError: () => {
+        if (connectionFailureRef.current) return
+        connectionFailureRef.current = true
+        instance.writeln('\r\n[CodeForge] Could not reach the terminal service.\r\n')
+      },
+      onWebSocketClose: () => {
+        if (connectionFailureRef.current) return
+        connectionFailureRef.current = true
+        instance.writeln('\r\n[CodeForge] Terminal connection closed.\r\n')
+      },
+    })
 
-    const demoMessages = [
-      'npm install complete',
-      'build succeeded',
-      'server restarted',
-      'watching for file changes',
-    ]
-
-    let index = 0
-    const intervalId = setInterval(() => {
-      const message = demoMessages[index % demoMessages.length]
-      instance.write(`\r\n[${new Date().toLocaleTimeString()}] ${message}`)
-      index += 1
-    }, 2200)
+    client.activate()
 
     return () => {
-      clearInterval(intervalId)
+      sendRef.current = null
+      void client.deactivate()
+      fitAddon.dispose()
+      window.removeEventListener('resize', handleWindowResize)
     }
-  }, [instance, socketUrl])
+  }, [instance, projectId])
 
   useEffect(() => {
     if (!ref.current) return undefined
 
     const focusTarget = ref.current
-    const handleFocus = () => {
-      focusTarget.classList.add('terminal-shell--focused')
-    }
-
-    const handleBlur = () => {
-      focusTarget.classList.remove('terminal-shell--focused')
-    }
+    const handleFocus = () => focusTarget.classList.add('terminal-shell--focused')
+    const handleBlur = () => focusTarget.classList.remove('terminal-shell--focused')
 
     focusTarget.addEventListener('focusin', handleFocus)
     focusTarget.addEventListener('focusout', handleBlur)
-
     return () => {
       focusTarget.removeEventListener('focusin', handleFocus)
       focusTarget.removeEventListener('focusout', handleBlur)
@@ -180,10 +174,6 @@ const Terminal = () => {
           background: rgba(148, 163, 184, 0.9);
         }
 
-        .terminal-shell .xterm-viewport::-webkit-scrollbar-thumb:active {
-          background: rgba(226, 232, 240, 0.9);
-        }
-
         .terminal-shell .xterm .xterm-cursor {
           border-left: 5px solid #7dd3fc !important;
           background: rgba(125, 211, 252, 0.18) !important;
@@ -196,8 +186,7 @@ const Terminal = () => {
           background: rgba(255, 255, 255, 0.2) !important;
         }
       `}</style>
-
-      <div ref={ref} className="terminal-shell" style={{ width: '100%', height: '100%' }} />
+      <div ref={ref} className="terminal-shell" />
     </>
   )
 }

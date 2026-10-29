@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import axios from 'axios'
+import api, { getAccessToken } from '../api'
 import Editor from '@monaco-editor/react'
 import { Client } from '@stomp/stompjs'
 import { FaCss3Alt, FaArrowDown } from 'react-icons/fa'
@@ -24,6 +24,10 @@ const demoContent = {
   'package.json': '{\n  "name": "codeforge-project",\n  "private": true,\n  "scripts": {\n    "dev": "vite"\n  }\n}\n',
   'README.md': '# CodeForge project\n\nA new project created in your cloud workspace.\n',
   'favicon.svg': '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><circle cx="16" cy="16" r="14" fill="#63b5ff"/></svg>\n',
+}
+
+function isImageFile(fileName) {
+  return /\.(avif|bmp|gif|ico|jpe?g|png|svg|webp)$/i.test(fileName)
 }
 
 function flattenFiles(nodes, parent = '') {
@@ -63,18 +67,56 @@ function PlaygroundPage() {
   const [openFiles, setOpenFiles] = useState([])
   const [activePath, setActivePath] = useState('src/App.jsx')
   const [content, setContent] = useState(demoContent['App.jsx'])
+  const [imagePreviewUrl, setImagePreviewUrl] = useState('')
   const [saved, setSaved] = useState(true)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [selectedPath, setSelectedPath] = useState('')
   const [connectionStatus, setConnectionStatus] = useState(projectId ? 'CONNECTING' : 'LOCAL')
+  const [preview, setPreview] = useState({ projectId: null, hostPort: null, status: 'loading' })
   const [isSaving, setIsSaving] = useState(false)
   const [isTerminalOpen, setIsTerminalOpen] = useState(false)
 
-  const projectPath = (path) => `${projectId}/${path}`
+  useEffect(() => {
+    if (!projectId) return undefined
+
+    let active = true
+    let timeoutId
+    const loadPreview = async () => {
+      try {
+        const response = await api.get(`/api/projects/${projectId}`)
+        if (!active) return
+
+        const { hostPort, status } = response.data
+        if (Number.isInteger(hostPort)) {
+          setPreview({ projectId, hostPort, status: 'ready' })
+          return
+        }
+        if (status === 'FAILED') {
+          setPreview({ projectId, hostPort: null, status: 'failed' })
+          return
+        }
+
+        setPreview({ projectId, hostPort: null, status: 'starting' })
+        timeoutId = window.setTimeout(loadPreview, 1500)
+      } catch {
+        if (active) setPreview({ projectId, hostPort: null, status: 'unavailable' })
+      }
+    }
+
+    void loadPreview()
+    return () => {
+      active = false
+      window.clearTimeout(timeoutId)
+    }
+  }, [projectId])
+
+  useEffect(() => () => {
+    if (imagePreviewUrl) URL.revokeObjectURL(imagePreviewUrl)
+  }, [imagePreviewUrl])
 
   const refreshTree = () => {
     if (!projectId) return Promise.resolve()
-    return axios.get(`/api/projects/${projectId}/tree`).then((response) => {
+    return api.get(`/api/projects/${projectId}/tree`).then((response) => {
       setTree(sortTree(response.data.children || []))
       setTreeStatus('Connected workspace')
     })
@@ -88,7 +130,7 @@ function PlaygroundPage() {
     if (!firstFile) return Promise.resolve()
     setActivePath(firstFile.path)
     setSelectedPath(firstFile.path)
-    return axios.get('/api/files', { params: { path: projectPath(firstFile.path) } }).then((fileResponse) => {
+    return api.get('/api/files', { params: { projectId, path: firstFile.path } }).then((fileResponse) => {
       setContent(fileResponse.data?.content ?? fileResponse.data ?? '')
       setSaved(true)
     })
@@ -96,7 +138,7 @@ function PlaygroundPage() {
 
   useEffect(() => {
     if (!projectId) return
-    axios.get(`/api/projects/${projectId}/tree`).then((response) => {
+    api.get(`/api/projects/${projectId}/tree`).then((response) => {
       const nextTree = sortTree(response.data.children || [])
       setTree(nextTree)
       setTreeStatus('Connected workspace')
@@ -108,13 +150,14 @@ function PlaygroundPage() {
     if (!projectId) return undefined
     const client = new Client({
       webSocketFactory: () => new SockJS('/api'),
+      connectHeaders: { Authorization: `Bearer ${getAccessToken() || ''}` },
       reconnectDelay: 0,
       connectionTimeout: 5000,
       onConnect: () => {
         setConnectionStatus('LIVE')
-        client.subscribe('/topic/files', (message) => {
+        client.subscribe('/user/queue/files', (message) => {
           const event = JSON.parse(message.body)
-          if (event.path?.startsWith(`${projectId}/`)) refreshTree()
+          if (event.projectId === projectId) refreshTree()
         })
       },
       onDisconnect: () => setConnectionStatus('OFFLINE'),
@@ -138,18 +181,39 @@ function PlaygroundPage() {
   const files = useMemo(() => flattenFiles(tree), [tree])
   const activeFile = files.find((file) => file.path === activePath) || { name: activePath.split('/').pop(), path: activePath }
   const language = activeFile.name.endsWith('.jsx') ? 'javascript' : activeFile.name.endsWith('.css') ? 'css' : activeFile.name.endsWith('.json') ? 'json' : activeFile.name.endsWith('.md') ? 'markdown' : 'plaintext'
+  const projectPreview = preview.projectId === projectId
+    ? preview
+    : { hostPort: null, status: 'loading' }
+  const previewUrl = projectPreview.hostPort
+    ? `${window.location.protocol}//${window.location.hostname}:${projectPreview.hostPort}/`
+    : null
 
   const openFile = async (node, path) => {
     setActivePath(path)
     setSelectedPath(path)
     setOpenFiles((current) => current.includes(path) ? current : [...current, path])
+    setImagePreviewUrl('')
     if (!projectId) {
+      if (isImageFile(node.name)) {
+        setStatusMessage('Image preview requires a connected project.')
+        return
+      }
       setContent(demoContent[node.name] || `// ${path}\n`)
       setSaved(true)
       return
     }
     try {
-      const response = await axios.get('/api/files', { params: { path: projectPath(path) } })
+      if (isImageFile(node.name)) {
+        const response = await api.get('/api/files/content', {
+          params: { projectId, path },
+          responseType: 'blob',
+        })
+        setImagePreviewUrl(URL.createObjectURL(response.data))
+        setContent('')
+        setSaved(true)
+        return
+      }
+      const response = await api.get('/api/files', { params: { projectId, path } })
       setContent(response.data?.content ?? response.data ?? '')
       setSaved(true)
     } catch (error) {
@@ -168,10 +232,10 @@ function PlaygroundPage() {
   }
 
   const saveFile = async () => {
-    if (!projectId || !activePath) return setSaved(true)
+    if (!projectId || !activePath || isImageFile(activePath)) return setSaved(true)
     setIsSaving(true)
     try {
-      await axios.put('/api/files', content, { params: { path: projectPath(activePath) }, headers: { 'Content-Type': 'text/plain' } })
+      await api.put('/api/files', content, { params: { projectId, path: activePath }, headers: { 'Content-Type': 'text/plain' } })
       setSaved(true)
     } catch (error) {
       setStatusMessage(error.response?.data?.error || error.message)
@@ -192,10 +256,9 @@ function PlaygroundPage() {
     if (!projectId) return setStatusMessage('Create actions require a project URL.')
     const name = window.prompt(`Name of new ${kind}:`)
     if (!name?.trim()) return
-    const parent = selectedPath ? projectPath(selectedPath) : projectId
-    const path = `${parent}/${name.trim()}`
+    const path = selectedPath ? `${selectedPath}/${name.trim()}` : name.trim()
     try {
-      await axios.post(`/api/files/${kind}`, null, { params: { path } })
+      await api.post(`/api/files/${kind}`, null, { params: { projectId, path } })
       setStatusMessage(`${kind === 'file' ? 'File' : 'Folder'} created.`)
       await refreshTree()
     } catch (error) {
@@ -207,7 +270,7 @@ function PlaygroundPage() {
     if (!projectId || !selectedPath) return setStatusMessage('Select a project file or folder first.')
     if (!window.confirm(`Delete ${selectedPath}? This cannot be undone.`)) return
     try {
-      await axios.delete('/api/files', { params: { path: projectPath(selectedPath) } })
+      await api.delete('/api/files', { params: { projectId, path: selectedPath } })
       setStatusMessage('Deleted successfully.')
       setSelectedPath('')
       await refreshTree()
@@ -238,6 +301,28 @@ function PlaygroundPage() {
       </div>
 
       <div className="playground-actions">
+        {projectId && (previewUrl ? (
+          <a
+            className="preview-button"
+            href={previewUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Open Preview ↗
+          </a>
+        ) : (
+          <span className="save-label" title={projectPreview.status === 'unavailable'
+            ? 'Could not load preview information from the backend'
+            : projectPreview.status === 'failed'
+              ? 'Project provisioning failed'
+              : 'The preview starts when the project terminal connects'}>
+            {projectPreview.status === 'unavailable'
+              ? 'PREVIEW STATUS UNAVAILABLE'
+              : projectPreview.status === 'failed'
+                ? 'PREVIEW UNAVAILABLE'
+                : 'PREVIEW STARTS WITH TERMINAL'}
+          </span>
+        ))}
         <span
           className={`save-label ${connectionStatus === "LIVE" ? "socket-live" : ""
             }`}
@@ -386,29 +471,35 @@ function PlaygroundPage() {
               height: isTerminalOpen ? "calc(100% - 200px)" : "100%",
             }}
           >
-            <Editor
-              height="100%"
-              language={language}
-              theme="vs-dark"
-              value={content}
-              onChange={(value) => {
-                setContent(value || "");
-                setSaved(false);
-              }}
-              options={{
-                minimap: {
-                  enabled: true,
-                },
-                fontSize: 14,
-                fontFamily: "DM Mono, monospace",
-                padding: {
-                  top: 22,
-                },
-                smoothScrolling: true,
-                wordWrap: "on",
-                tabSize: 2,
-              }}
-            />
+            {imagePreviewUrl ? (
+              <div className="image-preview">
+                <img src={imagePreviewUrl} alt={activeFile.name} />
+              </div>
+            ) : (
+              <Editor
+                height="100%"
+                language={language}
+                theme="vs-dark"
+                value={content}
+                onChange={(value) => {
+                  setContent(value || "");
+                  setSaved(false);
+                }}
+                options={{
+                  minimap: {
+                    enabled: true,
+                  },
+                  fontSize: 14,
+                  fontFamily: "DM Mono, monospace",
+                  padding: {
+                    top: 22,
+                  },
+                  smoothScrolling: true,
+                  wordWrap: "on",
+                  tabSize: 2,
+                }}
+              />
+            )}
           </div>
 
           {isTerminalOpen ? (
@@ -419,7 +510,7 @@ function PlaygroundPage() {
                 position: "relative",
               }}
             >
-              <Terminal />
+              <Terminal projectId={projectId} />
 
               <FaArrowDown
                 style={{

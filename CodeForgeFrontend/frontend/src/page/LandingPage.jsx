@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
+import { clearAccessToken, useAuthStatus } from "../api";
 import {
   FaReact,
   FaAngular,
@@ -106,6 +107,7 @@ const projectTypes = [
 
 function LandingPage() {
   const [activeIndex, setActiveIndex] = useState(0);
+  const isAuthenticated = useAuthStatus();
 
   const dragStart = useRef(null);
 
@@ -231,17 +233,23 @@ function LandingPage() {
 
         <div className="nav-actions">
 
-          <Link className="sign-in" to="/login">
-            Sign in
-          </Link>
-
-          <Link className="start-button" to="/register">
-            Get started
-
-            <span>
-              ↗
-            </span>
-          </Link>
+          {isAuthenticated ? (
+            <>
+              <Link className="start-button" to="/create">
+                Create project <span>↗</span>
+              </Link>
+              <button className="sign-in" type="button" onClick={clearAccessToken}>
+                Log out
+              </button>
+            </>
+          ) : (
+            <>
+              <Link className="sign-in" to="/login">Sign in</Link>
+              <Link className="start-button" to="/register">
+                Get started <span>↗</span>
+              </Link>
+            </>
+          )}
 
         </div>
 
